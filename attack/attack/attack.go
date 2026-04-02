@@ -42,17 +42,14 @@ func bruteForce(oracle *oracle.Oracle, ctBlock []byte, crafted []byte, j int, pa
 	g, ctx := errgroup.WithContext(ctx)
 	g.SetLimit(maxWorkers)
 
-	for guess := 0; guess < 256; guess++ {
+	for guess := range 256 {
 		if ctx.Err() != nil {
 			break
 		}
 
-		guess := guess
 		g.Go(func() error {
-			select {
-			case <-ctx.Done():
+			if ctx.Err() != nil {
 				return nil
-			default:
 			}
 
 			probe := make([]byte, aes.BlockSize*2)
@@ -129,7 +126,7 @@ func Attack(oracle *oracle.Oracle, ivAndCt []byte, maxWorkers int) ([]byte, erro
 	numBlocks := len(ivAndCt)/bs - 1
 	plainBlocks := make([][]byte, numBlocks)
 
-	for i := 0; i < numBlocks; i++ {
+	for i := range numBlocks {
 		fmt.Printf("Starting block %d/%d\n", i+1, numBlocks)
 		prevBlock := ivAndCt[i*bs : (i+1)*bs]
 		ctBlock := ivAndCt[(i+1)*bs : (i+2)*bs]
