@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"time"
@@ -43,6 +44,37 @@ func doPostRequest(url string, body any) (*http.Response, error) {
 	return resp, nil
 }
 
+func encryptMessage(msg string) ([]byte, error) {
+	type Body struct {
+		Text string `json:"text"`
+	}
+	body := Body{Text: msg}
+
+	resp, err := doPostRequest("http://localhost:3000/encrypt", body)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	type Response struct {
+		Encrypted string `json:"encrypted"`
+	}
+	var respBody Response
+	err = json.NewDecoder(resp.Body).Decode(&respBody)
+	if err != nil {
+		return nil, err
+	}
+
+	fmt.Printf("Ciphertext (b64): %s\n", respBody.Encrypted)
+
+	ivAndCt, err := base64.StdEncoding.DecodeString(respBody.Encrypted)
+	if err != nil {
+		return nil, err
+	}
+
+	return ivAndCt, nil
+}
+
 func oracleFn(ivAndCt []byte) (bool, error) {
 	b64 := base64.StdEncoding.EncodeToString(ivAndCt)
 
@@ -57,6 +89,11 @@ func oracleFn(ivAndCt []byte) (bool, error) {
 	}
 	defer resp.Body.Close()
 
+	_, err = io.Copy(io.Discard, resp.Body)
+	if err != nil {
+		return false, err
+	}
+
 	return resp.StatusCode != invalidPaddingStatus, nil
 }
 
@@ -67,34 +104,11 @@ func main() {
 	)
 	fmt.Printf("Message: %q\n", msg)
 
-	type Body struct {
-		Text string `json:"text"`
-	}
-	body := Body{Text: msg}
-
-	resp, err := doPostRequest("http://localhost:3000/encrypt", body)
+	ivAndCt, err := encryptMessage(msg)
 	if err != nil {
 		fmt.Printf("[ERROR] %s\n", err)
 		os.Exit(1)
 	}
-	defer resp.Body.Close()
-
-	type Response struct {
-		Encrypted string `json:"encrypted"`
-	}
-	var respBody Response
-	err = json.NewDecoder(resp.Body).Decode(&respBody)
-	if err != nil {
-		fmt.Printf("[ERROR] %s\n", err)
-		os.Exit(1)
-	}
-
-	ivAndCt, err := base64.StdEncoding.DecodeString(respBody.Encrypted)
-	if err != nil {
-		fmt.Printf("[ERROR] %s\n", err)
-		os.Exit(1)
-	}
-	fmt.Printf("Ciphertext (b64): %s\n", respBody.Encrypted)
 
 	orc := oracle.NewOracle(oracleFn)
 	recovered, err := attack.Attack(orc, ivAndCt, maxWorkers)
