@@ -7,9 +7,8 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"io"
-	"log"
 	"net/http"
+	"os"
 	"time"
 )
 
@@ -44,7 +43,7 @@ func doPostRequest(url string, body any) (*http.Response, error) {
 	return resp, nil
 }
 
-func oracleFn(ivAndCt []byte) bool {
+func oracleFn(ivAndCt []byte) (bool, error) {
 	b64 := base64.StdEncoding.EncodeToString(ivAndCt)
 
 	type Body struct {
@@ -54,16 +53,11 @@ func oracleFn(ivAndCt []byte) bool {
 
 	resp, err := doPostRequest("http://localhost:3000/oracle", body)
 	if err != nil {
-		log.Fatal(err)
+		return false, err
 	}
-	defer func(Body io.ReadCloser) {
-		err := Body.Close()
-		if err != nil {
-			log.Fatal(err)
-		}
-	}(resp.Body)
+	defer resp.Body.Close()
 
-	return resp.StatusCode != invalidPaddingStatus
+	return resp.StatusCode != invalidPaddingStatus, nil
 }
 
 func main() {
@@ -71,7 +65,7 @@ func main() {
 		"This is a very secret message. Current timestamp: %d",
 		time.Now().Unix(),
 	)
-	log.Printf("Message: %q\n", msg)
+	fmt.Printf("Message: %q\n", msg)
 
 	type Body struct {
 		Text string `json:"text"`
@@ -80,14 +74,10 @@ func main() {
 
 	resp, err := doPostRequest("http://localhost:3000/encrypt", body)
 	if err != nil {
-		log.Fatal(err)
+		fmt.Printf("[ERROR] %s\n", err)
+		os.Exit(1)
 	}
-	defer func(Body io.ReadCloser) {
-		err := Body.Close()
-		if err != nil {
-			log.Fatal(err)
-		}
-	}(resp.Body)
+	defer resp.Body.Close()
 
 	type Response struct {
 		Encrypted string `json:"encrypted"`
@@ -95,19 +85,26 @@ func main() {
 	var respBody Response
 	err = json.NewDecoder(resp.Body).Decode(&respBody)
 	if err != nil {
-		log.Fatal(err)
+		fmt.Printf("[ERROR] %s\n", err)
+		os.Exit(1)
 	}
 
 	ivAndCt, err := base64.StdEncoding.DecodeString(respBody.Encrypted)
 	if err != nil {
-		log.Fatal(err)
+		fmt.Printf("[ERROR] %s\n", err)
+		os.Exit(1)
 	}
-	log.Printf("Ciphertext (b64): %s\n", respBody.Encrypted)
+	fmt.Printf("Ciphertext (b64): %s\n", respBody.Encrypted)
 
 	orc := oracle.NewOracle(oracleFn)
-	recovered := attack.Attack(orc, ivAndCt, maxWorkers)
+	recovered, err := attack.Attack(orc, ivAndCt, maxWorkers)
+	if err != nil {
+		fmt.Printf("[ERROR] %s\n", err)
+		os.Exit(1)
+	}
+
 	callsUsed := orc.GetCalls()
 
-	log.Printf("Recovered: %q\n", string(recovered))
-	log.Printf("Oracle calls used: %d\n", callsUsed)
+	fmt.Printf("Recovered: %q\n", string(recovered))
+	fmt.Printf("Oracle calls used: %d\n", callsUsed)
 }

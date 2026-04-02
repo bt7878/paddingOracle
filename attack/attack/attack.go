@@ -5,108 +5,97 @@ import (
 	"bytes"
 	"context"
 	"crypto/aes"
-	"log"
+	"fmt"
 	"sync"
+
+	"golang.org/x/sync/errgroup"
 )
-
-type semaphore chan struct{}
-
-func newSemaphore(n int) semaphore { return make(semaphore, n) }
-func (s semaphore) Acquire()       { s <- struct{}{} }
-func (s semaphore) Release()       { <-s }
 
 func pkcs7Unpad(data []byte) ([]byte, bool) {
 	n := len(data)
+
 	if n == 0 {
 		return nil, false
 	}
+
 	pad := int(data[n-1])
 	if pad == 0 || pad > aes.BlockSize {
 		return nil, false
 	}
+
 	for i := n - pad; i < n; i++ {
 		if data[i] != byte(pad) {
 			return nil, false
 		}
 	}
+
 	return data[:n-pad], true
 }
 
-func bruteForce(
-	oracle *oracle.Oracle,
-	sem semaphore,
-	ctBlock []byte,
-	crafted []byte,
-	j int,
-	padByte byte,
-) int {
-	type hit struct{ guess int }
+func bruteForce(oracle *oracle.Oracle, ctBlock []byte, crafted []byte, j int, padByte byte, maxWorkers int) (int, error) {
+	found := -1
+	var once sync.Once
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	hits := make(chan hit, 1)
-	var wg sync.WaitGroup
+	g, ctx := errgroup.WithContext(ctx)
+	g.SetLimit(maxWorkers)
 
-loop:
 	for guess := 0; guess < 256; guess++ {
-		select {
-		case <-ctx.Done():
-			break loop
-		default:
+		if ctx.Err() != nil {
+			break
 		}
 
-		wg.Add(1)
-		go func(g int) {
-			defer wg.Done()
-
-			sem.Acquire()
-			defer sem.Release()
-
+		guess := guess
+		g.Go(func() error {
 			select {
 			case <-ctx.Done():
-				return
+				return nil
 			default:
 			}
 
 			probe := make([]byte, aes.BlockSize*2)
 			copy(probe, crafted)
-			probe[j] = byte(g)
+			probe[j] = byte(guess)
 			copy(probe[aes.BlockSize:], ctBlock)
 
-			if !oracle.HasValidPadding(probe) {
-				return
+			valid, err := oracle.HasValidPadding(probe)
+			if err != nil {
+				return err
+			}
+			if !valid {
+				return nil
 			}
 
 			if padByte == 1 && j > 0 {
-				verify := make([]byte, len(probe))
-				copy(verify, probe)
-				verify[j-1] ^= 0xFF
-				if !oracle.HasValidPadding(verify) {
-					return
+				probe[j-1] ^= 0xFF
+				valid, err := oracle.HasValidPadding(probe)
+				if err != nil {
+					return err
+				}
+				if !valid {
+					return nil
 				}
 			}
 
-			select {
-			case hits <- hit{g}:
+			once.Do(func() {
+				found = guess
 				cancel()
-			default:
-			}
-		}(guess)
+			})
+
+			return nil
+		})
 	}
 
-	go func() {
-		wg.Wait()
-		close(hits)
-	}()
-
-	if h, ok := <-hits; ok {
-		return h.guess
+	if err := g.Wait(); err != nil {
+		return -1, err
 	}
-	return -1
+
+	return found, nil
 }
 
-func decryptBlock(oracle *oracle.Oracle, sem semaphore, prevBlock, ctBlock []byte) []byte {
+func decryptBlock(oracle *oracle.Oracle, prevBlock, ctBlock []byte, maxWorkers int) ([]byte, error) {
 	bs := aes.BlockSize
 	intermediate := make([]byte, bs)
 	recovered := make([]byte, bs)
@@ -119,37 +108,45 @@ func decryptBlock(oracle *oracle.Oracle, sem semaphore, prevBlock, ctBlock []byt
 			crafted[k] = intermediate[k] ^ padByte
 		}
 
-		guess := bruteForce(oracle, sem, ctBlock, crafted, j, padByte)
-		if guess < 0 {
-			log.Fatalf("no valid guess for byte %d", j)
+		guess, err := bruteForce(oracle, ctBlock, crafted, j, padByte, maxWorkers)
+		if err != nil {
+			return nil, err
 		}
-		log.Printf("Byte %d: guess %d\n", j, guess)
+		if guess < 0 {
+			return nil, fmt.Errorf("no valid guess for byte %d", j)
+		}
+		fmt.Printf("Byte %d: guess %d\n", j, guess)
 
 		intermediate[j] = byte(guess) ^ padByte
 		recovered[j] = intermediate[j] ^ prevBlock[j]
 	}
 
-	return recovered
+	return recovered, nil
 }
 
-func Attack(oracle *oracle.Oracle, ivAndCt []byte, maxWorkers int) []byte {
+func Attack(oracle *oracle.Oracle, ivAndCt []byte, maxWorkers int) ([]byte, error) {
 	bs := aes.BlockSize
 	numBlocks := len(ivAndCt)/bs - 1
-
-	sem := newSemaphore(maxWorkers)
 	plainBlocks := make([][]byte, numBlocks)
 
 	for i := 0; i < numBlocks; i++ {
-		log.Printf("Starting block %d/%d\n", i+1, numBlocks)
+		fmt.Printf("Starting block %d/%d\n", i+1, numBlocks)
 		prevBlock := ivAndCt[i*bs : (i+1)*bs]
 		ctBlock := ivAndCt[(i+1)*bs : (i+2)*bs]
-		plainBlocks[i] = decryptBlock(oracle, sem, prevBlock, ctBlock)
-		log.Printf("Solved block %d: %x\n", i+1, string(plainBlocks[i]))
+
+		plainBlock, err := decryptBlock(oracle, prevBlock, ctBlock, maxWorkers)
+		if err != nil {
+			return nil, err
+		}
+
+		plainBlocks[i] = plainBlock
+		fmt.Printf("Solved block %d: %x\n", i+1, string(plainBlocks[i]))
 	}
 
 	raw := bytes.Join(plainBlocks, nil)
 	if unpadded, ok := pkcs7Unpad(raw); ok {
-		return unpadded
+		return unpadded, nil
 	}
-	return raw
+
+	return raw, nil
 }
