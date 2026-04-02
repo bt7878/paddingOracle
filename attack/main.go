@@ -20,7 +20,7 @@ var client = &http.Client{
 	Timeout: 60 * time.Second,
 }
 
-func doPostRequest[B any](url string, body B) (*http.Response, error) {
+func doPostRequest(url string, body any) (*http.Response, error) {
 	jsonBody, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
